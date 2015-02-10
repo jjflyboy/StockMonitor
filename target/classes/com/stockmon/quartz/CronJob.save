@@ -1,0 +1,175 @@
+/*
+ * To change this template, choose Tools | Templates
+ * and open the template in the editor.
+ */
+package com.robustsys.stockmon.quartz;
+
+//import com.eurorscg.rundmc2.consume.BlackRockNamespaceContext;
+//import com.eurorscg.rundmc2.consume.ServiceConsumer;
+//import com.eurorscg.rundmc2.consume.abstracts.ServiceCall;
+import com.robustsys.stockmon.beans.StockJobDataMap;
+
+
+
+
+
+//import com.mongodb.Mongo;
+//import java.io.IOException;
+//import java.net.UnknownHostException;
+import java.util.ArrayList;
+import java.util.Date;
+import java.util.List;
+
+
+
+
+
+
+
+//import static org.quartz.JobBuilder.newJob;
+//import com.novemberain.quartz.mongodb.MongoDBJobStore;
+//import org.slf4j.Logger;
+//import org.slf4j.LoggerFactory;
+import org.apache.log4j.Logger;
+import org.quartz.DisallowConcurrentExecution;
+import org.quartz.JobDataMap;
+import org.quartz.JobExecutionContext;
+import org.quartz.JobExecutionException;
+import org.quartz.TriggerKey;
+import org.springframework.scheduling.quartz.QuartzJobBean;
+
+/**
+ *
+ * @author gjerome
+ */
+    @DisallowConcurrentExecution
+    public class CronJob extends QuartzJobBean {//implements JobInterface
+        private Logger _log = Logger.getLogger(getClass());        
+        private DataMartDate asOf;
+        private String tickers;
+        private long numTickers = 0;
+        private boolean doProductRun;
+        private boolean doNonProductRun;
+        private String country;
+//        private String host = null;
+
+        private void init(JobExecutionContext context) //initializeParameters
+            throws JobExecutionException
+        {
+            JobDataMap data = null;
+//            if (context != null)
+                data = context.getTrigger().getJobDataMap();//getMergedJobDataMap()
+            TriggerKey trigKey = context.getTrigger().getKey();
+            String trigNameGroup = trigKey.getName() + trigKey.getGroup();
+            MongoOps ops = new MongoOps();
+            String collection = Constants.Mongo.JOB_DATA_MAP_COLLECTION; //SchedulerUtils.getCollection();
+            StockJobDataMap persistentDataMap = ops.QueryJobDataMap(trigNameGroup, collection);
+            if (!data.isEmpty() && persistentDataMap == null)
+            {
+                country = data.getString(Constants.COUNTRY);
+                asOf = Market.getAsOfDate(country);
+                
+                
+                if ( data.containsKey(Constants.DO_PRODUCT_RUN) )
+                    doProductRun = data.getBoolean(Constants.DO_PRODUCT_RUN);
+                if (data.containsKey(Constants.DO_NON_PRODUCT_RUN) )
+                    doNonProductRun = data.getBoolean(Constants.DO_NON_PRODUCT_RUN);
+                List<TickerMetaData> tm = ops.QueryTickerDataForCountry(country);
+                JobHelper jh = new JobHelper();
+                tickers =  jh.getTickers(tm);//get the tickers from the TickerMetaData collection (5/23/2014)
+                numTickers = jh.getNumTickers(tickers);
+                
+                
+                persistentDataMap = new StockJobDataMap(trigNameGroup,
+                        country,
+                        doProductRun,
+                        doNonProductRun,
+                        "",
+                        0,
+                        numTickers,
+                        tickers,
+                        Constants.Mongo.PULL_TYPE_AUTOMATIC,
+                        asOf.getAsOfDate(),
+                        context.getScheduledFireTime()
+                        );      
+                Holidays hols = new Holidays();
+                if ( hols.isHoliday( asOf.getAsOfDate() ) )
+                    throw new HolidayException();                
+            } else
+            {
+                //get it from Dmc2JobDataMap bean       
+                doProductRun = persistentDataMap.isProductRun();
+                doNonProductRun = persistentDataMap.isNonProductRun();     
+                country = persistentDataMap.getCountry();
+                asOf = new DataMartDate(persistentDataMap.getAsOfDate());
+            }
+            context.put(Constants.Quartz.DMC_JOB_DATA_MAP, persistentDataMap);                
+        }
+
+        @Override
+		protected void executeInternal(JobExecutionContext context)//JobExecutionContext context
+            throws JobExecutionException
+        {
+            MongoOps ops = new MongoOps();
+            DmcScheduler abort = ops.QuerySchedulerAbort();
+            if (abort != null)
+            {
+                return;//let the job listener shut down the scheduler
+            }
+            try {
+                init(context);
+            } catch (JobExecutionException jex)
+            {
+                _log.error(jex.getMessage());
+                throw jex;
+            }
+            /*
+            BCDocType theBCDoc;
+            if (country.equals(Constants.COUNTRY_US) )
+            {
+                theBCDoc = BCDocType.IPATH_DAILY;
+            }
+            else
+            {                    
+                theBCDoc = BCDocType.IPATH_CA_DAILY;
+            }
+            */
+            List<BCDocType> bcDocs = new ArrayList<BCDocType>();
+            bcDocs.add(BCDocType.IPATH_DAILY);
+            bcDocs.add(BCDocType.COUPON_YIELD_MONTHLY);//Diff FTP site - currently unknown 5/30/14
+//            bcDocs.add(BCDocType.GEMS_IMPLIED_YIELD);No rules currently defined (6/2/14)
+            bcDocs.add(BCDocType.ICI_WEIGHTS);// Diff FTP site - currently unknown 5/30/14
+            bcDocs.add(BCDocType.GRN_COMPONENTS);
+//            bcDocs.add(BCDocType.BENCHMARK_CORRELATION); Currently unknown (8/29/14); see SftpConsumer.consumeCurrentDocument()
+            bcDocs.add(BCDocType.FIXED_INCOME_COMPONENTS);
+            //This also handels non-product run
+            SftpConsumer consumer = new SftpConsumer();
+            List<Context> ctxts = null;
+            //Need runDate (last arg) in order to create a debugFile
+            try {
+                RunSemaphoreBean.setIsRunnng(true);
+                //retrieve all files needed for product and non-product run
+                consumer.consumeSFTPMethods(bcDocs, asOf.getAsOfDate());                    
+
+                RunBean2 run = new RunBean2();
+                run.setIsScheduled(true);
+                Character[] runTypeFilter = null;
+                if (doProductRun)
+                    runTypeFilter = new Character[] {'P','M','D','W','C'};//NB: added 'M','D' from below; D' = Distribution/Coupon run
+                if (doNonProductRun)
+                    runTypeFilter = new Character[] {'N','I'};//NB: removed 'M','D'
+                run.setJobContext(context);                            
+                ctxts = run.execute(runTypeFilter);
+            } catch (Exception ex) {
+                context.setResult(false);
+                throw new JobExecutionException("Unable to continue with the current run.");
+            } finally {
+                RunSemaphoreBean.setIsRunnng(false);
+            }
+            if (ctxts == null)
+                _log.error("Dmc2CronJob.executeInternal(): ctxts is null. Dmc2JobJistener won't be able to schedule followup job!");
+            else
+                context.setResult(ctxts);
+            _log.info("Run finished at :" + new Date());
+        }                    
+}
