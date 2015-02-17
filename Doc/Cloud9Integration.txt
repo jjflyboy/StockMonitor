@@ -1,1 +1,0 @@
-ssh://54d85f5bfcf9330d90000044@stockmonitor-casadeljj.rhcloud.com/~/git/stockmonitor.git/
