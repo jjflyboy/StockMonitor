@@ -1,0 +1,9 @@
+https://help.github.com/articles/importing-a-git-repository-using-the-command-line/
+
+StockMonitor GithURL: https://github.com/jjflyboy/StockMonitor
+
+1)
+git clone --bare C:\Users\jj\Documents\workspace-sts-3.6.2.RELEASE\StockMonitor\.git
+
+2)
+git push --mirror https://github.com/jjflyboy/StockMonitor
